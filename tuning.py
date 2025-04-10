@@ -800,7 +800,7 @@ def main():
                         help="Exclude entire param-sim if the average prevalence is below this threshold.")
     parser.add_argument("--output-dir", default="results", help="Directory to save model checkpoints and plot data")
     parser.add_argument("--seed", default=42, type=int, help="Random seed for reproducibility")
-    parser.add_argument("--patience", default=10, type=int, help="Patience for early stopping")
+    parser.add_argument("--patience", default=16, type=int, help="Patience for early stopping")
     parser.add_argument("--use-existing-split", action="store_true", help="Use existing train/val/test split from CSV file")
     parser.add_argument("--split-file", default=None, help="Path to existing train/val/test split CSV file")
     

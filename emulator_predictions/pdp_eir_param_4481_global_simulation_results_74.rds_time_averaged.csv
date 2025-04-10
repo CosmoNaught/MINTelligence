@@ -1,0 +1,2 @@
+param_name,param_value,gru_mean,gru_std,lstm_mean,lstm_std,time_point
+eir,371.082129671986,0.8516,0.0,0.857,0.0,
