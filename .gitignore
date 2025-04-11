@@ -1,0 +1,8 @@
+__pycache__/
+.outpack/
+archive/
+emulator_predictions/
+results_pfpr_test/
+results_test/
+tests/
+tmp/
