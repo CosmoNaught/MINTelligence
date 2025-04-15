@@ -128,12 +128,14 @@ class DataModule:
         self.input_size = None
         
     def fetch_data(self) -> pd.DataFrame:
-        """Fetch data from DuckDB database."""
+        """Fetch data from DuckDB database with performance optimizations."""
         logger.info(f"Connecting to DuckDB and fetching data from {self.config.db_path}")
-        start_time = time.time()
+        total_start_time = time.time()
 
+        # Connection with optimized settings
         con = duckdb.connect(self.config.db_path, read_only=True)
-        con.execute("PRAGMA threads=8;")
+        con.execute("PRAGMA memory_limit='24GB';")  # Allocate up to 24GB RAM
+        con.execute("PRAGMA threads=16;")  # EXPOSE THIS AS THIS IS UNIQUE TO MY SETUP
 
         param_where_clause = ""
         if self.config.param_limit != "all":
@@ -232,7 +234,11 @@ class DataModule:
         df = con.execute(final_query).df()
         con.close()
 
-        logger.info(f"Data fetched in {time.time() - start_time:.2f} seconds.")
+
+        # Add timing breakdown
+        query_time = time.time() - total_start_time
+        logger.info(f"Data fetched in {query_time:.2f} seconds.")
+        
         return df
         
     def prepare_data(self) -> None:
@@ -362,8 +368,8 @@ class DataModule:
         
     def _create_scalers(self) -> None:
         """Create and fit feature scalers."""
-        static_scalar_values = np.array([row[self.static_covars].values.astype(np.float32) 
-                                         for _, row in self.df.iterrows()])
+        # More efficient vectorized approach
+        static_scalar_values = self.df[self.static_covars].values.astype(np.float32)
         self.static_scaler = StandardScaler()
         self.static_scaler.fit(static_scalar_values)
         
@@ -381,37 +387,39 @@ class DataModule:
         logger.info(f"Input size for models set to {self.input_size}")
             
     def build_data_list(self, param_sims: set) -> List[Dict]:
-        """Build normalized data list for a set of parameter-simulation pairs."""
+        """Build normalized data list with vectorized operations."""
         param_sim_groups = self.df.groupby(["parameter_index", "simulation_index"])
         data_list = []
+        
         for ps in param_sims:
             subdf = param_sim_groups.get_group(ps).sort_values("timesteps")
             T = len(subdf)
 
-            # Get and scale static values
+            # Get and scale static values efficiently
             static_vals = subdf.iloc[0][self.static_covars].values.astype(np.float32)
             static_vals = self.static_scaler.transform(static_vals.reshape(1, -1)).flatten()
 
             t = subdf["timesteps"].values.astype(np.float32)
 
             if self.config.use_cyclical_time:
+                # Vectorized computation
                 day_of_year = t % 365.0
                 sin_t = np.sin(2 * math.pi * day_of_year / 365.0)
                 cos_t = np.cos(2 * math.pi * day_of_year / 365.0)
+                
+                # Create and fill array in one operation
                 X = np.zeros((T, 2 + len(self.static_covars)), dtype=np.float32)
-                for i in range(T):
-                    X[i, 0] = sin_t[i]
-                    X[i, 1] = cos_t[i]
-                    X[i, 2:] = static_vals
+                X[:, 0] = sin_t
+                X[:, 1] = cos_t
+                X[:, 2:] = np.tile(static_vals, (T, 1))
             else:
-                # Normalize timesteps
+                # Normalize timesteps vectorized
                 t_min, t_max = np.min(t), np.max(t)
                 t_norm = (t - t_min) / (t_max - t_min) if t_max > t_min else t
                 
                 X = np.zeros((T, 1 + len(self.static_covars)), dtype=np.float32)
-                for i in range(T):
-                    X[i, 0] = t_norm[i]
-                    X[i, 1:] = static_vals
+                X[:, 0] = t_norm
+                X[:, 1:] = np.tile(static_vals, (T, 1))
 
             Y = subdf["prevalence"].values.astype(np.float32)
 
@@ -441,7 +449,7 @@ class DataModule:
         }
         
     def create_dataloaders(self, datasets: Dict[str, Dataset], batch_size: int) -> Dict[str, DataLoader]:
-        """Create data loaders from datasets."""
+        """Create optimized data loaders from datasets."""
         train_loader = DataLoader(
             datasets["train"],
             batch_size=batch_size,
@@ -450,7 +458,8 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,   
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=4 if self.config.num_workers > 0 else None
+            prefetch_factor=8,  # Increased from 4 for better throughput
+            drop_last=True      # Added for consistent batch sizes during training
         )
 
         val_loader = DataLoader(
@@ -461,7 +470,7 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=4 if self.config.num_workers > 0 else None
+            prefetch_factor=8   # Increased from 4 for better throughput
         )
         
         test_loader = DataLoader(
@@ -472,7 +481,7 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=4 if self.config.num_workers > 0 else None
+            prefetch_factor=8   # Increased from 4 for better throughput
         )
         
         return {
@@ -480,7 +489,6 @@ class DataModule:
             "val": val_loader,
             "test": test_loader
         }
-
 ###########################
 # Dataset and DataLoader  #
 ###########################
@@ -856,11 +864,11 @@ class HyperparameterOptimizer:
         self.data_module = data_module
         
     def objective_for_model(self, trial: optuna.Trial, model_type: str) -> float:
-        """Objective function for Optuna optimization - Model-specific version."""
+        """Objective function for Optuna optimization with enhanced resource management."""
         # Sample hyperparameters
         lr = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512, 1024])
-        hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128, 256])
+        batch_size = self.config.batch_size
+        hidden_size = trial.suggest_categorical("hidden_size", [64, 128, 256])
         num_layers = trial.suggest_int("num_layers", 1, 4)
         dropout = trial.suggest_float("dropout", 0.0, 0.5)
         lookback = trial.suggest_categorical("lookback", [13, 26, 52, 78])
@@ -871,7 +879,6 @@ class HyperparameterOptimizer:
         # Print hyperparameters for this trial
         logger.info(f"\nTrial #{trial.number} for {model_type.upper()} with hyperparameters:")
         logger.info(f"    Learning Rate: {lr:.6f}")
-        logger.info(f"    Batch Size: {batch_size}")
         logger.info(f"    Hidden Size: {hidden_size}")
         logger.info(f"    Number of Layers: {num_layers}")
         logger.info(f"    Dropout: {dropout:.2f}")
@@ -880,60 +887,68 @@ class HyperparameterOptimizer:
         # Define output size
         output_size = 1
         
-        # Build datasets and create data loaders with current lookback
-        datasets = self.data_module.create_datasets(lookback)
-        train_dataset = datasets["train"]
-        val_dataset = datasets["val"]
+        datasets = None
+        train_loader = None
+        val_loader = None
+        model = None
+        optimizer = None
+        scheduler = None
+        trainer = None
         
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=collate_fn,
-            num_workers=self.config.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=4 if self.config.num_workers > 0 else None
-        )
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=self.config.num_workers,
-            pin_memory=True,
-            persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=4 if self.config.num_workers > 0 else None
-        )
-        
-        # Initialize model
-        model = ModelFactory.create_model(
-            model_type, 
-            self.data_module.input_size, 
-            hidden_size, 
-            output_size, 
-            dropout, 
-            num_layers
-        ).to(device)
-        
-        # Initialize optimizer
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        
-        # Initialize scheduler
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
-        
-        # Create temporary directory for trial outputs
-        trial_dir = os.path.join(self.config.tuning_output_dir, f"{model_type}_trial_{trial.number}")
-        os.makedirs(trial_dir, exist_ok=True)
-        
-        # Set the number of epochs for hyperparameter tuning to be shorter than the default
-        tuning_epochs = min(self.config.epochs, 16)  # Cap at 16 epochs to speed up tuning
-        
-        # Train model
         try:
+            # Build datasets and create data loaders with current lookback
+            datasets = self.data_module.create_datasets(lookback)
+            train_dataset = datasets["train"]
+            val_dataset = datasets["val"]
+            
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=self.config.num_workers,
+                pin_memory=True,
+                persistent_workers=True if self.config.num_workers > 0 else False,
+                prefetch_factor=4 if self.config.num_workers > 0 else None
+            )
+
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                collate_fn=collate_fn,
+                num_workers=self.config.num_workers,
+                pin_memory=True,
+                persistent_workers=True if self.config.num_workers > 0 else False,
+                prefetch_factor=4 if self.config.num_workers > 0 else None
+            )
+            
+            # Initialize model
+            model = ModelFactory.create_model(
+                model_type, 
+                self.data_module.input_size, 
+                hidden_size, 
+                output_size, 
+                dropout, 
+                num_layers
+            ).to(device)
+            
+            # Initialize optimizer
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            
+            # Initialize scheduler
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5, verbose=False  # Reduced verbosity
+            )
+            
+            # Create temporary directory for trial outputs
+            trial_dir = os.path.join(self.config.tuning_output_dir, f"{model_type}_trial_{trial.number}")
+            os.makedirs(trial_dir, exist_ok=True)
+            
+            # Set the number of epochs for hyperparameter tuning to be shorter than the default
+            tuning_epochs = min(self.config.epochs, 32)
+            
+            # Train model
             trainer = Trainer(model, self.config, trial_dir, model_type)
             model, best_val_loss, best_epoch = trainer.train(
                 train_loader, val_loader, optimizer, scheduler, tuning_epochs
@@ -945,7 +960,6 @@ class HyperparameterOptimizer:
                 'model_type': model_type,
                 'hyperparameters': {
                     'learning_rate': lr,
-                    'batch_size': batch_size,
                     'hidden_size': hidden_size,
                     'num_layers': num_layers,
                     'dropout': dropout,
@@ -958,12 +972,64 @@ class HyperparameterOptimizer:
             with open(os.path.join(trial_dir, f"{model_type}_trial_results.json"), 'w') as f:
                 json.dump(convert_to_json_serializable(trial_results), f, indent=4)
             
+            # Pre-cleanup before returning
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
             return best_val_loss
         
         except (RuntimeError, ValueError, torch.cuda.OutOfMemoryError) as e:
             # Handle errors (like OOM)
             logger.error(f"Trial failed due to: {str(e)}")
             return float('inf')  # Return a bad score
+        
+        finally:
+            # Comprehensive cleanup to prevent resource leaks
+            # Close and clean up DataLoaders first
+            if train_loader is not None:
+                # Force DataLoader cleanup
+                try:
+                    train_loader._iterator = None
+                    for w in getattr(train_loader, '_workers', []):
+                        if hasattr(w, 'is_alive') and w.is_alive():
+                            w.terminate()
+                except:
+                    pass
+            
+            if val_loader is not None:
+                try:
+                    val_loader._iterator = None
+                    for w in getattr(val_loader, '_workers', []):
+                        if hasattr(w, 'is_alive') and w.is_alive():
+                            w.terminate()
+                except:
+                    pass
+            
+            # Explicit deletion of objects
+            del train_loader
+            del val_loader
+            del model
+            del optimizer
+            del scheduler
+            del trainer
+            del datasets
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Monitor resources periodically
+            if trial.number % 5 == 0:  # Every 5 trials
+                try:
+                    import resource
+                    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    logger.info(f"Resource check - File descriptor limit: {soft_limit}/{hard_limit}")
+                except:
+                    pass
             
     def run_optimization(self) -> Dict[str, Dict[str, Any]]:
         """Run hyperparameter optimization for both GRU and LSTM models."""
@@ -997,9 +1063,10 @@ class HyperparameterOptimizer:
             study.optimize(
                 lambda trial: self.objective_for_model(trial, model_type),
                 n_trials=self.config.tuning_trials,
-                timeout=self.config.tuning_timeout // 2,  # Split timeout between the two models
+                timeout=self.config.tuning_timeout // 2,
                 gc_after_trial=True,
-                show_progress_bar=True
+                show_progress_bar=True,
+                n_jobs=4  # Run multiple trials in parallel (but don't overload your GPU)
             )
             
             # Get best parameters
@@ -1333,11 +1400,15 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # Optimize CUDA settings
     if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True  # Speed up training
+#        torch.backends.cudnn.deterministic = True
+        torch.cuda.empty_cache()             # Clear GPU memory
+        logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"Available GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
     logger.info(f"Random seed set to {seed} for reproducibility")
 
 def convert_to_json_serializable(obj: Any) -> Any:
@@ -1381,9 +1452,9 @@ def get_parser() -> argparse.ArgumentParser:
                         help="Lookback window (sequence length) for RNN inputs")
     
     # Training parameters
-    parser.add_argument("--epochs", default=100, type=int, help="Maximum number of training epochs")
+    parser.add_argument("--epochs", default=64, type=int, help="Maximum number of training epochs")
     parser.add_argument("--learning-rate", default=1e-3, type=float, help="Initial learning rate")
-    parser.add_argument("--batch-size", default=512, type=int, help="Batch size for training")
+    parser.add_argument("--batch-size", default=4096, type=int, help="Batch size for training")
     parser.add_argument("--num-workers", default=0, type=int, help="Number of worker processes for DataLoader")
     parser.add_argument("--device", default=None, help="Choose device: 'cuda' or 'cpu'. If None, auto-detect.")
     parser.add_argument("--patience", default=16, type=int, help="Patience for early stopping")
@@ -1396,8 +1467,8 @@ def get_parser() -> argparse.ArgumentParser:
     # Hyperparameter tuning
     parser.add_argument("--run-tuning", action="store_true", help="Run hyperparameter tuning with Optuna")
     parser.add_argument("--tuning-output-dir", default="results_tuned", help="Directory to save tuning results")
-    parser.add_argument("--tuning-timeout", type=int, default=3600*12, help="Timeout for tuning in seconds (default: 12 hours)")
-    parser.add_argument("--tuning-trials", type=int, default=16, help="Number of trials for hyperparameter tuning")
+    parser.add_argument("--tuning-timeout", type=int, default=3600*24, help="Timeout for tuning in seconds (default: 12 hours)")
+    parser.add_argument("--tuning-trials", type=int, default=32, help="Number of trials for hyperparameter tuning")
     parser.add_argument("--use-tuned-parameters", action="store_true", 
                         help="Use previously tuned parameters instead of defaults or command line arguments")
     
@@ -1429,7 +1500,6 @@ def main() -> None:
     model_hyperparams = {
         "gru": {
             "learning_rate": config.learning_rate,
-            "batch_size": config.batch_size,
             "hidden_size": config.hidden_size,
             "num_layers": config.num_layers,
             "dropout": config.dropout,
@@ -1437,7 +1507,6 @@ def main() -> None:
         },
         "lstm": {
             "learning_rate": config.learning_rate,
-            "batch_size": config.batch_size,
             "hidden_size": config.hidden_size,
             "num_layers": config.num_layers,
             "dropout": config.dropout,
@@ -1456,6 +1525,7 @@ def main() -> None:
         for model_type in ["gru", "lstm"]:
             if model_type in best_params:
                 model_hyperparams[model_type] = best_params[model_type]
+                model_hyperparams[model_type]["batch_size"] = config.batch_size
         
     elif config.use_tuned_parameters:
         logger.info("Attempting to load previously tuned parameters")
@@ -1494,6 +1564,10 @@ def main() -> None:
         
         # Get model hyperparameters
         params = model_hyperparams[model_type]
+        
+        # Create datasets and dataloaders
+        if "batch_size" not in params:
+            params["batch_size"] = config.batch_size
         
         # Create datasets and dataloaders
         datasets = data_module.create_datasets(params["lookback"])
