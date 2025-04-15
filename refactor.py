@@ -1419,6 +1419,7 @@ def main() -> None:
     config = Config(args)
     config.save(os.path.join(config.output_dir, "args.json"))
     logger.info(f"Configuration saved to {os.path.join(config.output_dir, 'args.json')}")
+    logger.info(f"Using device: {config.device}")
     
     # Create data module and prepare data
     data_module = DataModule(config)

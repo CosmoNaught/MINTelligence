@@ -3,6 +3,7 @@ __pycache__/
 archive/
 emulator_predictions/
 results_pfpr_test/
+results_tuned_pfpr_test/
 results_test/
 tests/
 tmp/
