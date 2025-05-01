@@ -2,7 +2,7 @@
 Time Series Forecasting with RNN Models (GRU and LSTM)
 ====================================================
 A modular implementation for training and evaluating recurrent neural networks
-on time series prevalence data.
+on time series prevalence data or clinical cases data.
 """
 
 import argparse
@@ -53,6 +53,7 @@ class Config:
         self.sim_limit = args.sim_limit
         self.min_prevalence = args.min_prevalence
         self.use_cyclical_time = args.use_cyclical_time
+        self.predictor = args.predictor  # New parameter for selecting prediction target
         
         # Model parameters
         self.hidden_size = args.hidden_size
@@ -69,14 +70,19 @@ class Config:
         self.num_workers = args.num_workers
         self.device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
         
-        # File paths
-        self.output_dir = args.output_dir
+        # File paths - modify to include predictor type in path
+        self.base_output_dir = args.output_dir
+        self.base_tuning_output_dir = args.tuning_output_dir
+        
+        # Create predictor-specific output directories
+        self.output_dir = os.path.join(self.predictor, self.base_output_dir)
+        self.tuning_output_dir = os.path.join(self.predictor, self.base_tuning_output_dir)
+        
         self.use_existing_split = args.use_existing_split
-        self.split_file = args.split_file if args.split_file else os.path.join(args.output_dir, "train_val_test_split.csv")
+        self.split_file = args.split_file if args.split_file else os.path.join(self.output_dir, "train_val_test_split.csv")
         
         # Hyperparameter tuning
         self.run_tuning = args.run_tuning
-        self.tuning_output_dir = args.tuning_output_dir
         self.tuning_timeout = args.tuning_timeout
         self.tuning_trials = args.tuning_trials
         self.use_tuned_parameters = args.use_tuned_parameters
@@ -127,10 +133,11 @@ class DataModule:
         self.val_params = None
         self.test_params = None
         self.input_size = None
+        self.target_column = "prevalence" if self.config.predictor == "prevalence" else "cases"
         
     def fetch_data(self) -> pd.DataFrame:
         """Fetch data from DuckDB database with performance optimizations."""
-        logger.info(f"Connecting to DuckDB and fetching data from {self.config.db_path}")
+        logger.info(f"Connecting to DuckDB and fetching {self.config.predictor} data from {self.config.db_path}")
         total_start_time = time.time()
 
         # Connection with optimized settings
@@ -167,74 +174,160 @@ class DataModule:
         else:
             random_sims_subquery = distinct_sims_subquery
 
-        cte_subquery = f"""
-            SELECT
-                t.parameter_index,
-                t.simulation_index,
-                t.global_index,
-                t.timesteps,
-                CASE WHEN t.n_age_0_1825 = 0 THEN NULL
-                     ELSE CAST(t.n_detect_lm_0_1825 AS DOUBLE) / t.n_age_0_1825
-                END AS raw_prevalence,
-                t.eir,
-                t.dn0_use,
-                t.dn0_future,
-                t.Q0,
-                t.phi_bednets,
-                t.seasonal,
-                t.routine,
-                t.itn_use,
-                t.irs_use,
-                t.itn_future,
-                t.irs_future,
-                t.lsm
-            FROM {self.config.table_name} t
-            JOIN ({random_sims_subquery}) rs
-            USING (parameter_index, simulation_index)
-        """
+        # Different handling for prevalence vs cases
+        if self.config.predictor == "prevalence":
+            # Original prevalence calculation
+            cte_subquery = f"""
+                SELECT
+                    t.parameter_index,
+                    t.simulation_index,
+                    t.global_index,
+                    t.timesteps,
+                    CASE WHEN t.n_age_0_1825 = 0 THEN NULL
+                         ELSE CAST(t.n_detect_lm_0_1825 AS DOUBLE) / t.n_age_0_1825
+                    END AS raw_prevalence,
+                    t.eir,
+                    t.dn0_use,
+                    t.dn0_future,
+                    t.Q0,
+                    t.phi_bednets,
+                    t.seasonal,
+                    t.routine,
+                    t.itn_use,
+                    t.irs_use,
+                    t.itn_future,
+                    t.irs_future,
+                    t.lsm
+                FROM {self.config.table_name} t
+                JOIN ({random_sims_subquery}) rs
+                USING (parameter_index, simulation_index)
+            """
 
-        preceding = self.config.window_size - 1
-        last_6_years_day = 6 * 365
+            preceding = self.config.window_size - 1
+            last_6_years_day = 6 * 365
 
-        final_query = f"""
-            WITH cte AS (
-                {cte_subquery}
-            )
-            SELECT
-                parameter_index,
-                simulation_index,
-                global_index,
-                ROW_NUMBER() OVER (
-                    PARTITION BY parameter_index, simulation_index
-                    ORDER BY timesteps
-                ) AS timesteps,
-                AVG(raw_prevalence) OVER (
-                    PARTITION BY parameter_index, simulation_index
-                    ORDER BY timesteps
-                    ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
-                ) AS prevalence,
+            final_query = f"""
+                WITH cte AS (
+                    {cte_subquery}
+                )
+                SELECT
+                    parameter_index,
+                    simulation_index,
+                    global_index,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY parameter_index, simulation_index
+                        ORDER BY timesteps
+                    ) AS timesteps,
+                    AVG(raw_prevalence) OVER (
+                        PARTITION BY parameter_index, simulation_index
+                        ORDER BY timesteps
+                        ROWS BETWEEN {preceding} PRECEDING AND CURRENT ROW
+                    ) AS prevalence,
+                    eir,
+                    dn0_use,
+                    dn0_future,
+                    Q0,
+                    phi_bednets,
+                    seasonal,
+                    routine,
+                    itn_use,
+                    irs_use,
+                    itn_future,
+                    irs_future,
+                    lsm
+                FROM cte
+                WHERE cte.timesteps >= {last_6_years_day}
+                  AND (cte.timesteps % {self.config.window_size}) = 0
+                ORDER BY parameter_index, simulation_index, timesteps
+            """
+        else:  # predictor == "cases"
+            # Cases calculation: 1000 * (n_inc_clinical_0_36500 / t.n_age_0_36500)
+            # Aggregated every 30 timesteps
+            cte_subquery = f"""
+                SELECT
+                    t.parameter_index,
+                    t.simulation_index,
+                    t.global_index,
+                    t.timesteps,
+                    t.n_inc_clinical_0_36500,  -- Include raw count
+                    t.n_age_0_36500,           -- Include raw count
+                    CASE WHEN t.n_age_0_36500 = 0 THEN NULL
+                        ELSE 1000.0 * CAST(t.n_inc_clinical_0_36500 AS DOUBLE) / t.n_age_0_36500
+                    END AS raw_cases,
+                    t.eir,
+                    t.dn0_use,
+                    t.dn0_future,
+                    t.Q0,
+                    t.phi_bednets,
+                    t.seasonal,
+                    t.routine,
+                    t.itn_use,
+                    t.irs_use,
+                    t.itn_future,
+                    t.irs_future,
+                    t.lsm
+                FROM {self.config.table_name} t
+                JOIN ({random_sims_subquery}) rs
+                USING (parameter_index, simulation_index)
+            """
 
-                eir,
-                dn0_use,
-                dn0_future,
-                Q0,
-                phi_bednets,
-                seasonal,
-                routine,
-                itn_use,
-                irs_use,
-                itn_future,
-                irs_future,
-                lsm
-            FROM cte
-            WHERE cte.timesteps >= {last_6_years_day}
-              AND (cte.timesteps % {self.config.window_size}) = 0
-            ORDER BY parameter_index, simulation_index, timesteps
-        """
+            last_6_years_day = 6 * 365
+            aggregation_window = self.config.window_size  # Use the configured window size
+
+            final_query = f"""
+                WITH cte AS (
+                    {cte_subquery}
+                ),
+                timestep_groups AS (
+                    SELECT
+                        parameter_index,
+                        simulation_index, 
+                        global_index,
+                        FLOOR((timesteps - {last_6_years_day}) / {aggregation_window}) AS group_id,
+                        1000.0 * SUM(n_inc_clinical_0_36500) / SUM(n_age_0_36500) AS cases,
+                        MAX(eir) AS eir,
+                        MAX(dn0_use) AS dn0_use,
+                        MAX(dn0_future) AS dn0_future,
+                        MAX(Q0) AS Q0,
+                        MAX(phi_bednets) AS phi_bednets,
+                        MAX(seasonal) AS seasonal,
+                        MAX(routine) AS routine,
+                        MAX(itn_use) AS itn_use,
+                        MAX(irs_use) AS irs_use,
+                        MAX(itn_future) AS itn_future,
+                        MAX(irs_future) AS irs_future,
+                        MAX(lsm) AS lsm
+                        FROM cte
+                        WHERE timesteps >= {last_6_years_day}
+                        GROUP BY parameter_index, simulation_index, global_index, group_id
+                )
+                SELECT
+                    parameter_index,
+                    simulation_index,
+                    global_index,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY parameter_index, simulation_index
+                        ORDER BY group_id
+                    ) AS timesteps,
+                    cases,
+                    eir,
+                    dn0_use,
+                    dn0_future,
+                    Q0,
+                    phi_bednets,
+                    seasonal,
+                    routine,
+                    itn_use,
+                    irs_use,
+                    itn_future,
+                    irs_future,
+                    lsm
+                FROM timestep_groups
+                ORDER BY parameter_index, simulation_index, group_id
+            """
 
         df = con.execute(final_query).df()
         con.close()
-
 
         # Add timing breakdown
         query_time = time.time() - total_start_time
@@ -247,8 +340,8 @@ class DataModule:
         # 1. Fetch data
         self.df = self.fetch_data()
         
-        # 2. Filter data based on prevalence threshold
-        self._filter_by_prevalence()
+        # 2. Filter data based on threshold - different for prevalence vs cases
+        self._filter_by_threshold()
         
         # 3. Create train/val/test split
         self._create_data_split()
@@ -261,17 +354,24 @@ class DataModule:
         
         logger.info("Data preparation completed successfully.")
         
-    def _filter_by_prevalence(self) -> None:
-        """Filter data based on prevalence threshold."""
+    def _filter_by_threshold(self) -> None:
+        """Filter data based on threshold appropriate for the predictor type."""
         group_cols = ["parameter_index", "simulation_index"]
-        group_means = self.df.groupby(group_cols)["prevalence"].mean().reset_index()
-        valid_groups = group_means[group_means["prevalence"] >= self.config.min_prevalence]
+        
+        if self.config.predictor == "prevalence":
+            # Original prevalence filtering
+            group_means = self.df.groupby(group_cols)["prevalence"].mean().reset_index()
+            valid_groups = group_means[group_means["prevalence"] >= self.config.min_prevalence]
+            logger.info(f"Filtered data to {len(valid_groups)} parameter-simulation pairs with prevalence >= {self.config.min_prevalence}")
+        else:  # cases
+            # For cases, filter based on having at least some cases
+            group_means = self.df.groupby(group_cols)["cases"].mean().reset_index()
+            valid_groups = group_means[group_means["cases"] > 0]
+            logger.info(f"Filtered data to {len(valid_groups)} parameter-simulation pairs with positive case counts")
+        
         valid_keys = set(zip(valid_groups["parameter_index"], valid_groups["simulation_index"]))
-
         self.df["param_sim"] = list(zip(self.df["parameter_index"], self.df["simulation_index"]))
         self.df = self.df[self.df["param_sim"].isin(valid_keys)]
-        
-        logger.info(f"Filtered data to {len(valid_keys)} parameter-simulation pairs with prevalence >= {self.config.min_prevalence}")
         
     def _create_data_split(self) -> None:
         """Create or load train/validation/test split."""
@@ -403,8 +503,10 @@ class DataModule:
             t = subdf["timesteps"].values.astype(np.float32)
 
             if self.config.use_cyclical_time:
-                # Vectorized computation
-                day_of_year = t % 365.0
+                if self.config.predictor == "cases":
+                    day_of_year = (t * self.config.window_size) % 365.0
+                else:
+                    day_of_year = t % 365.0
                 sin_t = np.sin(2 * math.pi * day_of_year / 365.0)
                 cos_t = np.cos(2 * math.pi * day_of_year / 365.0)
                 
@@ -422,7 +524,11 @@ class DataModule:
                 X[:, 0] = t_norm
                 X[:, 1:] = np.tile(static_vals, (T, 1))
 
-            Y = subdf["prevalence"].values.astype(np.float32)
+            # Get target variable based on predictor type
+            if self.config.predictor == "prevalence":
+                Y = subdf["prevalence"].values.astype(np.float32)
+            else:  # cases
+                Y = subdf["cases"].values.astype(np.float32)
 
             data_list.append({
                 "time_series": X,  
@@ -551,12 +657,12 @@ class ModelFactory:
     
     @staticmethod
     def create_model(model_type: str, input_size: int, hidden_size: int, output_size: int, 
-                     dropout_prob: float, num_layers: int = 1) -> nn.Module:
+                     dropout_prob: float, num_layers: int = 1, predictor: str = "prevalence") -> nn.Module:
         """Create a model of the specified type."""
         if model_type.lower() == "gru":
-            return GRUModel(input_size, hidden_size, output_size, dropout_prob, num_layers)
+            return GRUModel(input_size, hidden_size, output_size, dropout_prob, num_layers, predictor)
         elif model_type.lower() == "lstm":
-            return LSTMModel(input_size, hidden_size, output_size, dropout_prob, num_layers)
+            return LSTMModel(input_size, hidden_size, output_size, dropout_prob, num_layers, predictor)
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
@@ -565,11 +671,12 @@ class GRUModel(nn.Module):
     """GRU Model for time series prediction."""
     
     def __init__(self, input_size: int, hidden_size: int, output_size: int, 
-                 dropout_prob: float, num_layers: int = 1):
+                 dropout_prob: float, num_layers: int = 1, predictor: str = "prevalence"):
         """Initialize GRU model."""
         super(GRUModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.predictor = predictor
         self.gru = nn.GRU(
             input_size, hidden_size,
             num_layers=num_layers,
@@ -578,7 +685,12 @@ class GRUModel(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
         self.ln = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout_prob)
-        self.activation = nn.Sigmoid()
+        
+        # Different activation functions based on predictor type
+        if predictor == "prevalence":
+            self.activation = nn.Sigmoid()  # Bounded between 0 and 1
+        else:  # cases
+            self.activation = nn.Softplus()  # Non-negative but unbounded above
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model."""
@@ -594,11 +706,12 @@ class LSTMModel(nn.Module):
     """LSTM Model for time series prediction."""
     
     def __init__(self, input_size: int, hidden_size: int, output_size: int, 
-                 dropout_prob: float, num_layers: int = 1):
+                 dropout_prob: float, num_layers: int = 1, predictor: str = "prevalence"):
         """Initialize LSTM model."""
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.predictor = predictor
         self.lstm = nn.LSTM(
             input_size, hidden_size,
             num_layers=num_layers,
@@ -607,7 +720,12 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
         self.ln = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout_prob)
-        self.activation = nn.Sigmoid()
+        
+        # Different activation functions based on predictor type
+        if predictor == "prevalence":
+            self.activation = nn.Sigmoid()  # Bounded between 0 and 1
+        else:  # cases
+            self.activation = nn.Softplus()  # Non-negative but unbounded above
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model."""
@@ -805,20 +923,42 @@ class Trainer:
         mae = mean_absolute_error(all_targets, all_predictions)
         r2 = r2_score(all_targets, all_predictions)
         
-        # Calculate bounded metrics specific to prevalence data (0-1 range)
-        # Symmetric Mean Absolute Percentage Error (bounded version)
-        epsilon = 1e-7  # To avoid division by zero
-        smape = 100 * np.mean(2 * np.abs(all_predictions - all_targets) / 
-                             (np.abs(all_predictions) + np.abs(all_targets) + epsilon))
-        
-        # Calculate bias
-        bias = np.mean(all_predictions - all_targets)
-        
-        # Log likelihood of Beta distribution (approximation for bounded variables)
-        scaled_pred = np.clip(all_predictions, epsilon, 1-epsilon)
-        scaled_targets = np.clip(all_targets, epsilon, 1-epsilon)
-        log_likelihood = np.mean(np.log(scaled_pred) * scaled_targets + 
-                               np.log(1 - scaled_pred) * (1 - scaled_targets))
+        # Additional metrics depend on whether we're predicting prevalence or cases
+        if self.config.predictor == "prevalence":
+            # Bounded metrics specific to prevalence data (0-1 range)
+            # Symmetric Mean Absolute Percentage Error (bounded version)
+            epsilon = 1e-7  # To avoid division by zero
+            smape = 100 * np.mean(2 * np.abs(all_predictions - all_targets) / 
+                                 (np.abs(all_predictions) + np.abs(all_targets) + epsilon))
+            
+            # Calculate bias
+            bias = np.mean(all_predictions - all_targets)
+            
+            # Log likelihood of Beta distribution (approximation for bounded variables)
+            scaled_pred = np.clip(all_predictions, epsilon, 1-epsilon)
+            scaled_targets = np.clip(all_targets, epsilon, 1-epsilon)
+            log_likelihood = np.mean(np.log(scaled_pred) * scaled_targets + 
+                                   np.log(1 - scaled_pred) * (1 - scaled_targets))
+        else:  # cases
+            # Metrics more appropriate for count data
+            # Mean Absolute Percentage Error
+            epsilon = 1e-7  # To avoid division by zero
+            mape_valid_idx = np.where(np.abs(all_targets) > epsilon)[0]
+            if len(mape_valid_idx) > 0:
+                mape = np.mean(np.abs((all_targets[mape_valid_idx] - all_predictions[mape_valid_idx]) / 
+                                    (all_targets[mape_valid_idx] + epsilon))) * 100
+            else:
+                mape = float('nan')
+                
+            # Symmetric Mean Absolute Percentage Error
+            smape = 100 * np.mean(2 * np.abs(all_predictions - all_targets) / 
+                                 (np.abs(all_predictions) + np.abs(all_targets) + epsilon))
+            
+            # Calculate bias
+            bias = np.mean(all_predictions - all_targets)
+            
+            # For cases, we don't compute log_likelihood using Beta distribution
+            log_likelihood = float('nan')
         
         # Create results dictionary
         metrics = {
@@ -840,7 +980,8 @@ class Trainer:
         logger.info(f"    R²:   {r2:.6f}")
         logger.info(f"    SMAPE: {smape:.2f}%")
         logger.info(f"    Bias: {bias:.6f}")
-        logger.info(f"    Log-Likelihood: {log_likelihood:.6f}")
+        if not np.isnan(log_likelihood):
+            logger.info(f"    Log-Likelihood: {log_likelihood:.6f}")
         
         return metrics, all_predictions, all_targets
     
@@ -925,14 +1066,15 @@ class HyperparameterOptimizer:
                 prefetch_factor=4 if self.config.num_workers > 0 else None
             )
             
-            # Initialize model
+            # Initialize model with predictor type
             model = ModelFactory.create_model(
                 model_type, 
                 self.data_module.input_size, 
                 hidden_size, 
                 output_size, 
                 dropout, 
-                num_layers
+                num_layers,
+                self.config.predictor  # Pass predictor type to model factory
             ).to(device)
             
             # Initialize optimizer
@@ -1046,7 +1188,7 @@ class HyperparameterOptimizer:
             logger.info(f"\nStarting optimization for {model_type.upper()} model")
             
             # Create study name based on dataset and model configuration
-            study_name = f"{model_type}_optimization_{int(time.time())}"
+            study_name = f"{model_type}_{self.config.predictor}_optimization_{int(time.time())}"
             
             # Create sampler with seed for reproducibility
             sampler = TPESampler(seed=self.config.seed)
@@ -1083,6 +1225,7 @@ class HyperparameterOptimizer:
             # Save best parameters and full study results
             model_tuning_results = {
                 'model_type': model_type,
+                'predictor': self.config.predictor,
                 'best_params': model_best_params,
                 'best_validation_loss': model_best_value,
                 'study_name': study_name,
@@ -1233,7 +1376,11 @@ class Visualizer:
         
         plt.xlabel('Metric')
         plt.ylabel('Value')
-        plt.title('Model Performance Comparison on Test Set')
+        
+        # Update title based on predictor type
+        title_suffix = "Prevalence" if self.config.predictor == "prevalence" else "Cases"
+        plt.title(f'Model Performance Comparison on Test Set ({title_suffix})')
+        
         plt.xticks(x, metrics_to_plot)
         plt.legend()
         plt.grid(alpha=0.3)
@@ -1266,6 +1413,9 @@ class Visualizer:
         # Create a list to store all plot data
         all_plot_data = []
 
+        # Set y-axis label based on predictor type
+        y_label = "Prevalence" if self.config.predictor == "prevalence" else "Cases per 1000"
+
         for i, param_idx in enumerate(subset_for_plot):
             if param_idx not in param_groups.groups:
                 logger.warning(f"Parameter index {param_idx} not found in test data, skipping")
@@ -1281,20 +1431,28 @@ class Visualizer:
             ax = axes[i]
             raw_param_index = subdf_param['parameter_index'].iloc[0]
 
+            # Get the target column name based on predictor type
+            target_col = "prevalence" if self.config.predictor == "prevalence" else "cases"
+
             # Plot all simulations for this parameter
             for sim_idx, sim_df in sim_groups:
                 # Check if this exact parameter-sim combination was in test set
                 if (param_idx, sim_idx) in self.data_module.test_param_sims:
                     linestyle = "-"  # Solid line for test sims
                     alpha = 0.7
-                    label = "True Prevalence (Test)" if sim_idx == list(sim_groups.groups.keys())[0] else None
+                    label = f"True {y_label} (Test)" if sim_idx == list(sim_groups.groups.keys())[0] else None
                 else:
                     linestyle = "--"  # Dashed line for other sims
                     alpha = 0.3
-                    label = "True Prevalence (Other)" if sim_idx == list(sim_groups.groups.keys())[0] else None
+                    label = f"True {y_label} (Other)" if sim_idx == list(sim_groups.groups.keys())[0] else None
                     
                 t = sim_df["timesteps"].values.astype(np.float32)
-                y_true = sim_df["prevalence"].values.astype(np.float32)
+                
+                # Scale the x-axis for cases - each timestep represents 30 days
+                if self.config.predictor == "cases":
+                    t = t * self.config.window_size
+                    
+                y_true = sim_df[target_col].values.astype(np.float32)
                 ax.plot(t, y_true, color="black", alpha=alpha, linewidth=1, linestyle=linestyle, label=label)
 
             # For prediction, use only a test simulation
@@ -1320,7 +1478,11 @@ class Visualizer:
             T = len(sim_df)
 
             if self.config.use_cyclical_time:
-                day_of_year = t % 365.0
+                if self.config.predictor == "cases":
+                    day_of_year = (t * self.config.window_size) % 365.0
+                else:
+                    day_of_year = t % 365.0
+                    
                 sin_t = np.sin(2 * np.pi * day_of_year / 365.0)
                 cos_t = np.cos(2 * np.pi * day_of_year / 365.0)
                 X_full = np.zeros((T, 2 + len(self.data_module.static_covars)), dtype=np.float32)
@@ -1346,25 +1508,31 @@ class Visualizer:
                 'is_test': (param_idx, first_sim_idx) in self.data_module.test_param_sims
             }
 
+            # Scale t for plotting if using cases (30-day intervals)
+            if self.config.predictor == "cases":
+                t_plot = t * self.config.window_size
+            else:
+                t_plot = t
+
             # Make predictions with both models
             for model_type in ["gru", "lstm"]:
                 y_pred = trainers[model_type].predict_sequence(X_full)
                 
                 # Plot predictions
                 color = "red" if model_type == "gru" else "blue"
-                ax.plot(t, y_pred, label=model_type.upper(), color=color)
+                ax.plot(t_plot, y_pred, label=model_type.upper(), color=color)
                 
                 # Add to plot data
                 for j in range(len(t)):
                     if j == 0:  # First iteration, create entry
                         if 'timestep' not in plot_data_entry:
-                            plot_data_entry['timestep'] = t[j]
-                            plot_data_entry['true_prevalence'] = sim_df["prevalence"].values[j]
+                            plot_data_entry['timestep'] = t_plot[j]
+                            plot_data_entry[f'true_{self.config.predictor}'] = sim_df[target_col].values[j]
                         plot_data_entry[f'{model_type}_prediction'] = y_pred[j]
                     else:  # Subsequent iterations, update existing entry
                         entry_copy = plot_data_entry.copy()
-                        entry_copy['timestep'] = t[j]
-                        entry_copy['true_prevalence'] = sim_df["prevalence"].values[j]
+                        entry_copy['timestep'] = t_plot[j]
+                        entry_copy[f'true_{self.config.predictor}'] = sim_df[target_col].values[j]
                         entry_copy[f'{model_type}_prediction'] = y_pred[j]
                         all_plot_data.append(entry_copy)
             
@@ -1373,8 +1541,8 @@ class Visualizer:
             
             test_status = "(Test)" if param_idx in self.data_module.test_params else "(Non-Test)"
             ax.set_title(f"Parameter Index = {raw_param_index} {test_status}")
-            ax.set_xlabel("Time Step")
-            ax.set_ylabel("Prevalence")
+            ax.set_xlabel("Time Step" if self.config.predictor == "prevalence" else "Days")
+            ax.set_ylabel(y_label)
             ax.legend()
 
         # For any empty subplots, hide them
@@ -1446,6 +1614,8 @@ def get_parser() -> argparse.ArgumentParser:
                         help="Exclude entire param-sim if the average prevalence is below this threshold.")
     parser.add_argument("--use-cyclical-time", action="store_true",
                         help="Whether to encode timesteps as sin/cos of day_of_year (mod 365).")
+    parser.add_argument("--predictor", default="prevalence", choices=["prevalence", "cases"],
+                        help="What to predict: 'prevalence' (pfpr) or 'cases'")
     
     # Model parameters
     parser.add_argument("--hidden-size", default=64, type=int, help="Hidden size for RNNs")
@@ -1492,9 +1662,13 @@ def main() -> None:
     
     # Create configuration
     config = Config(args)
+    
+    # Ensure predictor directory exists
+    os.makedirs(config.output_dir, exist_ok=True)
     config.save(os.path.join(config.output_dir, "args.json"))
     logger.info(f"Configuration saved to {os.path.join(config.output_dir, 'args.json')}")
     logger.info(f"Using device: {config.device}")
+    logger.info(f"Predicting: {config.predictor}")
     
     # Create data module and prepare data
     data_module = DataModule(config)
@@ -1566,7 +1740,7 @@ def main() -> None:
     
     # Train and evaluate both models
     for model_type in ["gru", "lstm"]:
-        logger.info(f"\n========== Training {model_type.upper()} Model ==========")
+        logger.info(f"\n========== Training {model_type.upper()} Model for {config.predictor} ==========")
         
         # Get model hyperparameters
         params = model_hyperparams[model_type]
@@ -1579,7 +1753,7 @@ def main() -> None:
         datasets = data_module.create_datasets(params["lookback"])
         dataloaders = data_module.create_dataloaders(datasets, params["batch_size"])
         
-        # Initialize model
+        # Initialize model with predictor type
         output_size = 1
         model = ModelFactory.create_model(
             model_type, 
@@ -1587,7 +1761,8 @@ def main() -> None:
             params["hidden_size"], 
             output_size, 
             params["dropout"], 
-            params["num_layers"]
+            params["num_layers"],
+            config.predictor  # Pass predictor type
         )
         
         # Initialize optimizer
@@ -1629,6 +1804,7 @@ def main() -> None:
     
     # Save test metrics for both models
     json_serializable_results = convert_to_json_serializable({
+        "predictor": config.predictor,
         "gru": model_metrics["gru"]["test_metrics"],
         "lstm": model_metrics["lstm"]["test_metrics"]
     })
@@ -1643,7 +1819,7 @@ def main() -> None:
     visualizer.plot_model_comparison(config.output_dir, model_metrics)
     visualizer.plot_test_predictions(config.output_dir, models, trainers)
     
-    logger.info("\nExperiment completed successfully!")
+    logger.info(f"\nExperiment for {config.predictor} completed successfully!")
 
 if __name__ == "__main__":
     main()
