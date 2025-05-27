@@ -1014,7 +1014,7 @@ class HyperparameterOptimizer:
         hidden_size = trial.suggest_categorical("hidden_size", [128, 256, 512])
         num_layers = trial.suggest_int("num_layers", 1, 4)
         dropout = trial.suggest_float("dropout", 0.0, 0.5)
-        lookback = trial.suggest_categorical("lookback", [13, 26, 52, 78])
+        lookback = trial.suggest_categorical("lookback", [13, 26, 52, 78]) 
         
         # Set device
         device = torch.device(self.config.device)
