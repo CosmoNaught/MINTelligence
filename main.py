@@ -1,10 +1,3 @@
-"""
-Time Series Forecasting with RNN Models (GRU and LSTM)
-====================================================
-A modular implementation for training and evaluating recurrent neural networks
-on time series prevalence data or clinical cases data.
-"""
-
 import argparse
 import json
 import logging
@@ -12,7 +5,7 @@ import math
 import os
 import random
 import time
-from typing import Dict, List, Tuple, Optional, Union, Any
+from typing import Dict, List, Tuple, Optional, Any
 
 import duckdb
 import matplotlib.pyplot as plt
@@ -121,9 +114,10 @@ class Config:
         self.seed = args.seed
 
         # Loss shaping / transforms
-        self.diff_loss_alpha = getattr(args, "diff_loss_alpha", 0.5)
+        self.diff_loss_alpha = getattr(args, "diff_loss_alpha", 0.05)
         self.diff2_loss_beta = getattr(args, "diff2_loss_beta", 0.0)
         self.eps_prevalence = getattr(args, "eps_prevalence", 1e-5)
+        self.loss_space = getattr(args, "loss_space", "natural")
         
         # Create output directories
         os.makedirs(self.output_dir, exist_ok=True)
@@ -294,6 +288,7 @@ class DataModule:
                      irs_future,
                      lsm
                  FROM timestep_groups
+                 WHERE prevalence IS NOT NULL
                  ORDER BY parameter_index, simulation_index, group_id
             """
         else:  # predictor == "cases"
@@ -385,6 +380,7 @@ class DataModule:
                     irs_future,
                     lsm
                 FROM timestep_groups
+                WHERE cases IS NOT NULL
                 ORDER BY parameter_index, simulation_index, group_id
             """
 
@@ -565,10 +561,11 @@ class DataModule:
         
     def _set_input_size(self) -> None:
         """Determine input size for models based on feature encoding."""
+        extra_dyn = 2  # post9 flag, time_since_post9 (years)
         if self.config.use_cyclical_time:
-            self.input_size = 2 + len(self.static_covars)  # sin, cos, static features
+            self.input_size = 2 + len(self.static_covars) + extra_dyn
         else:
-            self.input_size = 1 + len(self.static_covars)  # time, static features
+            self.input_size = 1 + len(self.static_covars) + extra_dyn
         logger.info(f"Input size for models set to {self.input_size}")
             
     def build_data_list(self, param_sims: set) -> List[Dict]:
@@ -578,6 +575,11 @@ class DataModule:
         
         for ps in param_sims:
             subdf = param_sim_groups.get_group(ps).sort_values("timesteps")
+            # Drop any residual NA/inf rows on the target to avoid NaN losses
+            target_col = "prevalence" if self.config.predictor == "prevalence" else "cases"
+            subdf = subdf.replace([np.inf, -np.inf], np.nan).dropna(subset=[target_col])
+            if len(subdf) == 0:
+                continue
             T = len(subdf)
 
             # Absolute and relative time
@@ -596,21 +598,30 @@ class DataModule:
             # Scale per timestep with train-fitted scaler
             scaled_matrix = self.static_scaler.transform(raw_matrix)
 
+            # dynamic event features
+            post9 = (abs_t >= self.intervention_day).astype(np.float32)
+            t_since9_days = np.maximum(0.0, abs_t - self.intervention_day)
+            t_since9_years = (t_since9_days / 365.0).astype(np.float32)
+
             if self.config.use_cyclical_time:
                 day_of_year = abs_t % 365.0
                 sin_t = np.sin(2 * math.pi * day_of_year / 365.0)
                 cos_t = np.cos(2 * math.pi * day_of_year / 365.0)
                 
-                X = np.zeros((T, 2 + len(self.static_covars)), dtype=np.float32)
+                X = np.zeros((T, 2 + len(self.static_covars) + 2), dtype=np.float32)
                 X[:, 0] = sin_t
                 X[:, 1] = cos_t
-                X[:, 2:] = scaled_matrix
+                X[:, 2:2+len(self.static_covars)] = scaled_matrix
+                X[:, -2] = post9
+                X[:, -1] = t_since9_years
             else:
                 t_min, t_max = np.min(t), np.max(t)
                 t_norm = (t - t_min) / (t_max - t_min) if t_max > t_min else t
-                X = np.zeros((T, 1 + len(self.static_covars)), dtype=np.float32)
+                X = np.zeros((T, 1 + len(self.static_covars) + 2), dtype=np.float32)
                 X[:, 0] = t_norm
-                X[:, 1:] = scaled_matrix
+                X[:, 1:1+len(self.static_covars)] = scaled_matrix
+                X[:, -2] = post9
+                X[:, -1] = t_since9_years
 
             # Targets and weights
             if self.config.predictor == "prevalence":
@@ -637,7 +648,7 @@ class DataModule:
         test_groups = self.build_data_list(self.test_param_sims)
 
         # Train with overlapping windows; validate/test with non-overlapping windows
-        train_dataset = TimeSeriesDataset(train_groups, lookback=lookback, stride=1)
+        train_dataset = TimeSeriesDataset(train_groups, lookback=lookback, stride=getattr(self.config, "train_stride", 1))
         val_dataset   = TimeSeriesDataset(val_groups,   lookback=lookback, stride=lookback)
         test_dataset  = TimeSeriesDataset(test_groups,  lookback=lookback, stride=lookback)
         
@@ -653,7 +664,7 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,   
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=8,
+            prefetch_factor=8 if self.config.num_workers > 0 else None,
             drop_last=True
         )
 
@@ -665,7 +676,7 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=8
+            prefetch_factor=8 if self.config.num_workers > 0 else None,
         )
         
         test_loader = DataLoader(
@@ -676,7 +687,7 @@ class DataModule:
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=True if self.config.num_workers > 0 else False,
-            prefetch_factor=8
+            prefetch_factor=8 if self.config.num_workers > 0 else None,
         )
         
         return {"train": train_loader, "val": val_loader, "test": test_loader}
@@ -686,35 +697,30 @@ class DataModule:
 ###########################
 
 class TimeSeriesDataset(Dataset):
-    """Dataset for time series data."""
-    
+    """Dataset that lazily slices windows to avoid exploding RAM."""
     def __init__(self, groups: List[Dict], lookback: int = 30, stride: int = 1):
-        self.samples = []
-        self.lookback = lookback
+        self.groups = groups
+        self.lookback = int(lookback)
         self.stride = max(1, int(stride))
-        for g in groups:
-            ts = g['time_series']
-            y  = g['targets']
-            w  = g.get('weights', np.ones(len(y), dtype=np.float32))
-            T  = g['length']
-
-            for start in range(0, T - lookback + 1, self.stride):
-                end = start + lookback
-                self.samples.append({
-                    'X': ts[start:end],
-                    'Y': y[start:end],
-                    'W': w[start:end],
-                    'param_sim_id': g['param_sim_id']
-                })
+        # Build an index of (group_id, start)
+        self.index: List[Tuple[int, int]] = []
+        for gi, g in enumerate(self.groups):
+            T = int(g['length'])
+            if T < self.lookback:
+                continue
+            for start in range(0, T - self.lookback + 1, self.stride):
+                self.index.append((gi, start))
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.index)
 
     def __getitem__(self, idx: int):
-        item = self.samples[idx]
-        X = item['X']
-        Y = item['Y']
-        W = item['W']
+        gi, start = self.index[idx]
+        g = self.groups[gi]
+        end = start + self.lookback
+        X = g['time_series'][start:end]
+        Y = g['targets'][start:end]
+        W = g.get('weights', np.ones_like(Y, dtype=np.float32))[start:end]
         return (torch.tensor(X, dtype=torch.float32),
                 torch.tensor(Y, dtype=torch.float32),
                 torch.tensor(W, dtype=torch.float32))
@@ -820,6 +826,7 @@ class Trainer:
         self.criterion = nn.MSELoss(reduction="none")  # we'll weight manually
         self.model.to(self.device)
         self.predictor = config.predictor
+        self.loss_space = config.loss_space
 
     @staticmethod
     def _weighted_mse(pred, target, weight):
@@ -827,6 +834,12 @@ class Trainer:
         loss = (weight * (pred - target) ** 2)
         denom = torch.clamp(weight.sum(), min=1.0)
         return loss.sum() / denom
+    
+    def _maybe_to_natural(self, pred, target):
+        if self.loss_space == "natural":
+            pred = inverse_transform_torch(pred, self.predictor)
+            target = inverse_transform_torch(target, self.predictor)
+        return pred, target
         
     def train(self, train_loader: DataLoader, val_loader: DataLoader, 
               optimizer: torch.optim.Optimizer, scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
@@ -861,10 +874,11 @@ class Trainer:
 
                 with autocast(device_type='cuda' if self.device.type == 'cuda' else 'cpu'):
                     pred = self.model(X).squeeze(-1)   # (time, batch)
-                    base = self._weighted_mse(pred, Y, W)
+                    p0, y0 = self._maybe_to_natural(pred, Y)
+                    base = self._weighted_mse(p0, y0, W)
                     # Shape-aware losses on temporal derivatives
-                    d1_pred = torch.diff(pred, dim=0)
-                    d1_true = torch.diff(Y, dim=0)
+                    d1_pred = torch.diff(p0, dim=0)
+                    d1_true = torch.diff(y0, dim=0)
                     W_mid = (W[1:] + W[:-1]) * 0.5
                     d1 = self._weighted_mse(d1_pred, d1_true, W_mid)
                     if self.config.diff2_loss_beta > 0.0:
@@ -902,13 +916,15 @@ class Trainer:
 
                     with autocast(device_type='cuda' if self.device.type == 'cuda' else 'cpu'):
                         pred_val = self.model(X_val).squeeze(-1)
-                        base = self._weighted_mse(pred_val, Y_val, W_val)
-                        d1 = self._weighted_mse(torch.diff(pred_val, dim=0),
-                                                torch.diff(Y_val, dim=0),
+                        # match training: compute loss in the chosen space
+                        pv, yv = self._maybe_to_natural(pred_val, Y_val)
+                        base = self._weighted_mse(pv, yv, W_val)
+                        d1 = self._weighted_mse(torch.diff(pv, dim=0),
+                        torch.diff(yv, dim=0),
                                                 (W_val[1:] + W_val[:-1]) * 0.5)
                         if self.config.diff2_loss_beta > 0.0:
-                            d2 = self._weighted_mse(torch.diff(torch.diff(pred_val, dim=0), dim=0),
-                                                    torch.diff(torch.diff(Y_val, dim=0), dim=0),
+                            d2 = self._weighted_mse(torch.diff(torch.diff(pv, dim=0), dim=0),
+                                                    torch.diff(torch.diff(yv, dim=0), dim=0),
                                                     ((W_val[1:] + W_val[:-1]) * 0.5)[1:])
                         else:
                             d2 = torch.tensor(0.0, device=pred_val.device)
@@ -1479,20 +1495,28 @@ class Visualizer:
                     raw_matrix[~post_mask, j] = 0.0
             scaled_matrix = self.data_module.static_scaler.transform(raw_matrix)
             
+            # dynamic event features
+            post9 = (abs_t >= self.data_module.intervention_day).astype(np.float32)
+            t_since9_years = np.maximum(0.0, abs_t - self.data_module.intervention_day) / 365.0
+
             if self.config.use_cyclical_time:
                 day_of_year = abs_t % 365.0
                 sin_t = np.sin(2 * np.pi * day_of_year / 365.0)
                 cos_t = np.cos(2 * np.pi * day_of_year / 365.0)
-                X_full = np.zeros((T, 2 + len(self.data_module.static_covars)), dtype=np.float32)
+                X_full = np.zeros((T, 2 + len(self.data_module.static_covars) + 2), dtype=np.float32)
                 X_full[:, 0] = sin_t
                 X_full[:, 1] = cos_t
-                X_full[:, 2:] = scaled_matrix
+                X_full[:, 2:2+len(self.data_module.static_covars)] = scaled_matrix
+                X_full[:, -2] = post9
+                X_full[:, -1] = t_since9_years
             else:
                 t_min, t_max = np.min(t), np.max(t)
                 t_norm = (t - t_min) / (t_max - t_min) if t_max > t_min else t
-                X_full = np.zeros((T, 1 + len(self.data_module.static_covars)), dtype=np.float32)
+                X_full = np.zeros((T, 1 + len(self.data_module.static_covars) + 2), dtype=np.float32)
                 X_full[:, 0] = t_norm
-                X_full[:, 1:] = scaled_matrix
+                X_full[:, 1:1+len(self.data_module.static_covars)] = scaled_matrix
+                X_full[:, -2] = post9
+                X_full[:, -1] = t_since9_years
 
             plot_data_entry = {
                 'parameter_index': raw_param_index,
@@ -1607,6 +1631,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-layers", default=1, type=int, help="Number of RNN layers")
     parser.add_argument("--dropout", default=0.1, type=float, help="Dropout probability")
     parser.add_argument("--lookback", default=30, type=int, help="Lookback window (sequence length) for RNN inputs")
+    parser.add_argument("--train-stride", default=1, type=int,
+                        help="Stride for training windows (set >1 to subsample windows for big datasets)")
     
     # Training parameters
     parser.add_argument("--epochs", default=64, type=int, help="Maximum number of training epochs")
@@ -1616,8 +1642,11 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", default=0, type=int, help="Number of worker processes for DataLoader")
     parser.add_argument("--device", default=None, help="Choose device: 'cuda' or 'cpu'. If None, auto-detect.")
     parser.add_argument("--patience", default=16, type=int, help="Patience for early stopping")
-    parser.add_argument("--diff-loss-alpha", default=0.5, type=float,
+    parser.add_argument("--diff-loss-alpha", default=0.05, type=float,
                         help="Weight for first-derivative loss term")
+    parser.add_argument("--loss-space", choices=["transformed","natural"],
+                        default="natural",
+                        help="Compute loss in transformed space or after inverse-transform")
     parser.add_argument("--diff2-loss-beta", default=0.0, type=float,
                         help="Weight for second-derivative loss term")
     parser.add_argument("--eps-prevalence", default=1e-5, type=float,
