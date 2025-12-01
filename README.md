@@ -1,4 +1,4 @@
-# MINTverse RNN (Core Baseline)
+# MINTelligence (MINTe) - MINTverse RNN (Core Baseline)
 
 This repo contains the legacy GRU/LSTM baseline I use for forecasting malaria dynamics from MINTverse simulations.
 
@@ -264,4 +264,9 @@ It’s specifically:
   * proper weighting for heterogeneous exposure,
   * shape-aware losses,
   * and a simple Optuna wrapper.
+ 
+# Coming Soon!
+
+- PyPI implementation for training and inference with pre-trained weights for back-end API support
+- ONNX compatibility layer
 ```
