@@ -1,0 +1,15 @@
+\begin{table}[t]
+\centering
+\caption{Hyperparameter optimization summary.}
+\label{tab:optimization_summary}
+\begin{tabular}{llS[table-format=3.0]S[table-format=1.6]S[table-format=2.1]S[table-format=3.0]}
+\toprule
+\textbf{Predictor} & \textbf{Model} & \textbf{Trials} & \textbf{Best Loss} & \textbf{Time (h)} & \textbf{Best Trial}\\
+\midrule
+Prevalence & GRU & 16 & 0.000586 & 6.3 & 15\\
+Prevalence & LSTM & 32 & 0.000660 & 6.1 & 10\\
+Cases & GRU & 23 & 0.034798 & 6.6 & 22\\
+Cases & LSTM & 26 & 0.038307 & 6.3 & 25\\
+\bottomrule
+\end{tabular}
+\end{table}

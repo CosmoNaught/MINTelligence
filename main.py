@@ -1099,7 +1099,7 @@ class HyperparameterOptimizer:
         lr = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-1, log=True)
         batch_size = self.config.batch_size
-        hidden_size = trial.suggest_categorical("hidden_size", [128, 256, 512])
+        hidden_size = trial.suggest_categorical("hidden_size", [64, 128, 256, 512])
         num_layers = trial.suggest_int("num_layers", 1, 4)
         dropout = trial.suggest_float("dropout", 0.0, 0.5)
         lookback = trial.suggest_categorical("lookback", [13, 26, 52, 78]) 
