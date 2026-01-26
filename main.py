@@ -416,15 +416,19 @@ class DataModule:
 
         if self.config.predictor == "prevalence":
             group_means = self.df.groupby(group_cols)["prevalence"].mean().reset_index()
+            total_count = len(group_means)
             valid_groups = group_means[group_means["prevalence"] >= self.config.min_prevalence]
+            pct = 100 * len(valid_groups) / total_count if total_count > 0 else 0
             logger.info(
-                f"Filtered to {len(valid_groups)} param-sims with mean prevalence >= {self.config.min_prevalence}"
+                f"Filtered to {len(valid_groups)}/{total_count} param-sims ({pct:.1f}%) with mean prevalence >= {self.config.min_prevalence}"
             )
         else:  # cases
             group_means = self.df.groupby(group_cols)["cases"].mean().reset_index()
+            total_count = len(group_means)
             valid_groups = group_means[group_means["cases"] >= self.config.min_cases]
+            pct = 100 * len(valid_groups) / total_count if total_count > 0 else 0
             logger.info(
-                f"Filtered to {len(valid_groups)} param-sims with mean cases >= {self.config.min_cases} per 1000 per day"
+                f"Filtered to {len(valid_groups)}/{total_count} param-sims ({pct:.1f}%) with mean cases >= {self.config.min_cases}"
             )
 
         valid_keys = set(zip(valid_groups["parameter_index"], valid_groups["simulation_index"]))
@@ -978,7 +982,7 @@ class Trainer:
         
         logger.info(f"Training completed. Best model was at epoch {best_epoch} with validation loss: {best_val_loss:.6f}")
         
-        checkpoint = torch.load(best_model_path)
+        checkpoint = torch.load(best_model_path, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         
         final_model_path = os.path.join(self.output_dir, f"{self.model_name}_final.pt")
@@ -1162,7 +1166,7 @@ class HyperparameterOptimizer:
             
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=5, verbose=False
+                optimizer, mode='min', factor=0.5, patience=5
             )
             
             trial_dir = os.path.join(self.config.tuning_output_dir, f"{model_type}_trial_{trial.number}")
@@ -1353,44 +1357,53 @@ class Visualizer:
         self.config = config
         self.data_module = data_module
         
-    def plot_training_history(self, output_dir: str, model_results: Dict[str, Dict[str, Any]]) -> None:
+    def plot_training_history(self, output_dir: str) -> None:
+        """Plot training and validation loss curves for both models."""
         gru_history_path = os.path.join(output_dir, "gru_training_history.json")
         lstm_history_path = os.path.join(output_dir, "lstm_training_history.json")
-        
-        if os.path.exists(gru_history_path) and os.path.exists(lstm_history_path):
-            with open(gru_history_path, 'r') as f:
-                gru_history = json.load(f)
-            with open(lstm_history_path, 'r') as f:
-                lstm_history = json.load(f)
-            
-            plt.figure(figsize=(12, 6))
-            plt.subplot(1, 2, 1)
-            plt.plot(gru_history['epochs'], gru_history['train_loss'], label='Train Loss')
-            plt.plot(gru_history['epochs'], gru_history['val_loss'], label='Validation Loss')
-            plt.axvline(x=model_results["gru"]["best_epoch"], color='r', linestyle='--', alpha=0.5, 
-                       label=f'Best Epoch ({model_results["gru"]["best_epoch"]})')
-            plt.title('GRU Training History')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(alpha=0.3)
-            
-            plt.subplot(1, 2, 2)
-            plt.plot(lstm_history['epochs'], lstm_history['train_loss'], label='Train Loss')
-            plt.plot(lstm_history['epochs'], lstm_history['val_loss'], label='Validation Loss')
-            plt.axvline(x=model_results["lstm"]["best_epoch"], color='r', linestyle='--', alpha=0.5, 
-                       label=f'Best Epoch ({model_results["lstm"]["best_epoch"]})')
-            plt.title('LSTM Training History')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(alpha=0.3)
-            
-            plt.tight_layout()
-            plot_path = os.path.join(output_dir, "training_history.png")
-            plt.savefig(plot_path)
-            logger.info(f"Training history plot saved to {plot_path}")
-            plt.close()
+
+        if not (os.path.exists(gru_history_path) and os.path.exists(lstm_history_path)):
+            logger.warning("Training history files not found, skipping loss plots")
+            return
+
+        with open(gru_history_path, 'r') as f:
+            gru_history = json.load(f)
+        with open(lstm_history_path, 'r') as f:
+            lstm_history = json.load(f)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # GRU plot
+        ax = axes[0]
+        ax.plot(gru_history['epochs'], gru_history['train_loss'], label='Train Loss', color='blue')
+        ax.plot(gru_history['epochs'], gru_history['val_loss'], label='Validation Loss', color='orange')
+        if 'best_epoch' in gru_history:
+            ax.axvline(x=gru_history['best_epoch'], color='red', linestyle='--', alpha=0.7,
+                       label=f'Best Epoch ({gru_history["best_epoch"]})')
+        ax.set_title('GRU Training History')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        # LSTM plot
+        ax = axes[1]
+        ax.plot(lstm_history['epochs'], lstm_history['train_loss'], label='Train Loss', color='blue')
+        ax.plot(lstm_history['epochs'], lstm_history['val_loss'], label='Validation Loss', color='orange')
+        if 'best_epoch' in lstm_history:
+            ax.axvline(x=lstm_history['best_epoch'], color='red', linestyle='--', alpha=0.7,
+                       label=f'Best Epoch ({lstm_history["best_epoch"]})')
+        ax.set_title('LSTM Training History')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, "training_history.png")
+        plt.savefig(plot_path, dpi=150)
+        logger.info(f"Training history plot saved to {plot_path}")
+        plt.close()
             
     def plot_model_comparison(self, output_dir: str, model_metrics: Dict[str, Dict[str, Any]]) -> None:
         plt.figure(figsize=(10, 6))
@@ -1420,13 +1433,13 @@ class Visualizer:
         plt.close()
             
     def plot_test_predictions(self, output_dir: str, models: Dict[str, nn.Module], trainers: Dict[str, Trainer]) -> None:
-        """Visualize test set predictions."""
+        """Visualize test set predictions with consistent styling for both cases and prevalence."""
         df_test_sims = self.data_module.fetch_data()
-        
+
         test_param_indices = list(self.data_module.test_params)
         random.shuffle(test_param_indices)
         subset_for_plot = test_param_indices[:9] if len(test_param_indices) >= 9 else test_param_indices
-        
+
         df_test_sims = df_test_sims[df_test_sims["parameter_index"].isin(subset_for_plot)]
         param_groups = df_test_sims.groupby("parameter_index")
 
@@ -1438,12 +1451,13 @@ class Visualizer:
 
         all_plot_data = []
         y_label = "Prevalence" if self.config.predictor == "prevalence" else "Cases per 1000 per day"
+        target_col = "prevalence" if self.config.predictor == "prevalence" else "cases"
 
         for i, param_idx in enumerate(subset_for_plot):
             if param_idx not in param_groups.groups:
                 logger.warning(f"Parameter index {param_idx} not found in test data, skipping")
                 continue
-                
+
             subdf_param = param_groups.get_group(param_idx)
             sim_groups = subdf_param.groupby("simulation_index")
             if len(sim_groups) == 0:
@@ -1452,39 +1466,38 @@ class Visualizer:
 
             ax = axes[i]
             raw_param_index = subdf_param['parameter_index'].iloc[0]
-            target_col = "prevalence" if self.config.predictor == "prevalence" else "cases"
 
-            for sim_idx, sim_df in sim_groups:
-                if (param_idx, sim_idx) in self.data_module.test_param_sims:
-                    linestyle = "-"
-                    alpha = 0.7
-                    label = f"True {y_label} (Test)" if sim_idx == list(sim_groups.groups.keys())[0] else None
-                else:
-                    linestyle = "--"
-                    alpha = 0.3
-                    label = f"True {y_label} (Other)" if sim_idx == list(sim_groups.groups.keys())[0] else None
-                    
-                t = sim_df["timesteps"].values.astype(np.float32)
-                if self.config.predictor == "cases":
-                    t = sim_df["abs_timesteps"].values.astype(np.float32)  # real days
-                y_true = sim_df[target_col].values.astype(np.float32)
-                ax.plot(t, y_true, color="black", alpha=alpha, linewidth=1, linestyle=linestyle, label=label)
+            # Collect all simulation data for this parameter
+            all_sim_data = []
+            for _, sim_df in sim_groups:
+                sim_df_sorted = sim_df.sort_values("abs_timesteps")
+                abs_t = sim_df_sorted["abs_timesteps"].values.astype(np.float32)
+                t_years = abs_t / 365.0  # Convert to years
+                y_true = sim_df_sorted[target_col].values.astype(np.float32)
+                all_sim_data.append((t_years, y_true, sim_df_sorted))
 
-            valid_sim_indices = [sim_idx for sim_idx in sim_groups.groups.keys() 
-                                if (param_idx, sim_idx) in self.data_module.test_param_sims]
-            if not valid_sim_indices:
-                logger.warning(f"No test simulations found for parameter {param_idx}, using first available sim")
-                first_sim_idx = list(sim_groups.groups.keys())[0]
-            else:
-                first_sim_idx = valid_sim_indices[0]
-                
-            sim_df = sim_groups.get_group(first_sim_idx).sort_values("timesteps")
-            global_idx = sim_df['global_index'].iloc[0]
+            # Plot individual simulations in black with alpha=0.2
+            for idx, (t_years, y_true, _) in enumerate(all_sim_data):
+                label = "Individual sims" if idx == 0 else None
+                ax.plot(t_years, y_true, color="black", alpha=0.2, linewidth=1, linestyle="-", label=label)
 
-            t = sim_df["timesteps"].values.astype(np.float32)
-            abs_t = sim_df["abs_timesteps"].values.astype(np.float32)
-            base_static = sim_df.iloc[0][self.data_module.static_covars].values.astype(np.float32)
-            T = len(sim_df)
+            # Plot average of all simulations in black with alpha=1.0
+            if all_sim_data:
+                ref_t = all_sim_data[0][0]
+                y_values = np.array([sd[1] for sd in all_sim_data])
+                y_mean = np.mean(y_values, axis=0)
+                ax.plot(ref_t, y_mean, color="black", alpha=1.0, linewidth=2, linestyle="-", label="True (mean)")
+
+            # Vertical dashed line at year 9 (intervention)
+            ax.axvline(x=9, color="gray", linestyle="--", linewidth=1.5, label="Intervention")
+
+            # Use first simulation for model predictions
+            first_sim_df = all_sim_data[0][2]
+            abs_t = first_sim_df["abs_timesteps"].values.astype(np.float32)
+            t_years = abs_t / 365.0
+            t = first_sim_df["timesteps"].values.astype(np.float32)
+            base_static = first_sim_df.iloc[0][self.data_module.static_covars].values.astype(np.float32)
+            T = len(first_sim_df)
 
             # Build covariate matrix with gating (match training)
             raw_matrix = np.tile(base_static, (T, 1))
@@ -1494,7 +1507,7 @@ class Visualizer:
                     j = self.data_module.static_covars.index(cov)
                     raw_matrix[~post_mask, j] = 0.0
             scaled_matrix = self.data_module.static_scaler.transform(raw_matrix)
-            
+
             # dynamic event features
             post9 = (abs_t >= self.data_module.intervention_day).astype(np.float32)
             t_since9_years = np.maximum(0.0, abs_t - self.data_module.intervention_day) / 365.0
@@ -1518,47 +1531,35 @@ class Visualizer:
                 X_full[:, -2] = post9
                 X_full[:, -1] = t_since9_years
 
-            plot_data_entry = {
-                'parameter_index': raw_param_index,
-                'simulation_index': first_sim_idx,
-                'global_index': global_idx,
-                'is_test': (param_idx, first_sim_idx) in self.data_module.test_param_sims
-            }
-
-            t_plot = abs_t if self.config.predictor == "cases" else t
-
+            # Plot model predictions
             for model_type in ["gru", "lstm"]:
                 y_pred = trainers[model_type].predict_sequence(X_full)
                 color = "red" if model_type == "gru" else "blue"
-                ax.plot(t_plot, y_pred, label=model_type.upper(), color=color)
-                
-                for j in range(len(t_plot)):
-                    if j == 0:
-                        if 'timestep' not in plot_data_entry:
-                            plot_data_entry['timestep'] = t_plot[j]
-                            plot_data_entry[f'true_{self.config.predictor}'] = sim_df[target_col].values[j]
-                        plot_data_entry[f'{model_type}_prediction'] = y_pred[j]
-                    else:
-                        entry_copy = plot_data_entry.copy()
-                        entry_copy['timestep'] = t_plot[j]
-                        entry_copy[f'true_{self.config.predictor}'] = sim_df[target_col].values[j]
-                        entry_copy[f'{model_type}_prediction'] = y_pred[j]
-                        all_plot_data.append(entry_copy)
-            
-            all_plot_data.append(plot_data_entry)
-            
+                ax.plot(t_years, y_pred, label=model_type.upper(), color=color, linewidth=1.5)
+
+                # Save plot data
+                for j in range(len(t_years)):
+                    all_plot_data.append({
+                        'parameter_index': raw_param_index,
+                        'year': t_years[j],
+                        f'true_{self.config.predictor}': first_sim_df[target_col].values[j],
+                        f'{model_type}_prediction': y_pred[j]
+                    })
+
             test_status = "(Test)" if param_idx in self.data_module.test_params else "(Non-Test)"
-            ax.set_title(f"Parameter Index = {raw_param_index} {test_status}")
-            ax.set_xlabel("Years" if self.config.predictor == "prevalence" else "Days")
+            ax.set_title(f"Param {raw_param_index} {test_status}", fontsize=10)
+            ax.set_xlabel("Year")
             ax.set_ylabel(y_label)
-            ax.legend()
+            ax.set_xlim(6, 12)
+            ax.legend(loc="upper right", fontsize=7)
+            ax.grid(True, alpha=0.3)
 
         for i in range(len(subset_for_plot), len(axes)):
             axes[i].axis('off')
 
         plot_path = os.path.join(output_dir, "test_predictions.png")
         plt.tight_layout()
-        plt.savefig(plot_path)
+        plt.savefig(plot_path, dpi=150)
         logger.info(f"Saved test plot to {plot_path}")
         plt.close()
 
@@ -1757,7 +1758,7 @@ def main() -> None:
         
         optimizer = torch.optim.Adam(model.parameters(), lr=params["learning_rate"], weight_decay=params["weight_decay"])
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         
         trainer = Trainer(model, config, config.output_dir, model_type)
@@ -1790,7 +1791,7 @@ def main() -> None:
         both_models = {}
         both_trainers = {}
         for mt in ["gru", "lstm"]:
-            checkpoint = torch.load(os.path.join(config.output_dir, f"{mt}_final.pt"))
+            checkpoint = torch.load(os.path.join(config.output_dir, f"{mt}_final.pt"), weights_only=True)
             model = ModelFactory.create_model(
                 mt, data_module.input_size,
                 model_hyperparams[mt]["hidden_size"],
@@ -1811,6 +1812,7 @@ def main() -> None:
         visualizer = Visualizer(config, data_module)
         visualizer.plot_model_comparison(config.output_dir, model_metrics)
         visualizer.plot_test_predictions(config.output_dir, both_models, both_trainers)
+        visualizer.plot_training_history(config.output_dir)
     except Exception as e:
         logger.warning(f"Plotting comparison skipped: {e}")
 
