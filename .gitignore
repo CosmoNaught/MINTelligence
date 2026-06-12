@@ -10,7 +10,6 @@ prod_check/
 test_new_clamp/
 test_pypi_version/
 tst/
-validation_plots/
 cpu-bench/
 eir_check/
 hbr_check/
