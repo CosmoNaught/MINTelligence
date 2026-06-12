@@ -1,0 +1,16 @@
+case_id,description,scenario,true_eir,prev_y9,emu_eir_baseline,emu_eir_adjusted,emu_hbr_baseline,emu_hbr_adjusted,msim_hbr_baseline,msim_hbr_at_adj_eir,hbr_baseline_ratio,hbr_adjusted_ratio
+8,Perennial - ITN Only - Mid EIR - Low dn0,+50%,12.06,0.3266,12.12,18.45,244178.0,366267.0,243242.0,360158.0,1.0038,1.017
+8,Perennial - ITN Only - Mid EIR - Low dn0,-50%,12.06,0.3266,12.12,5.55,244178.0,122089.0,243242.0,123220.0,1.0038,0.9908
+8,Perennial - ITN Only - Mid EIR - Low dn0,baseline,12.06,0.3266,12.12,12.12,244178.0,244178.0,243242.0,243242.0,1.0038,1.0038
+13,Perennial - ITN Only - Low EIR - High dn0,+50%,2.23,0.1233,2.23,3.73,81085.0,121627.0,81165.0,121112.0,0.999,1.0043
+13,Perennial - ITN Only - Low EIR - High dn0,-50%,2.23,0.1233,2.23,0.81,81085.0,40542.0,81165.0,40720.0,0.999,0.9956
+13,Perennial - ITN Only - Low EIR - High dn0,baseline,2.23,0.1233,2.23,2.23,81085.0,81085.0,81165.0,81165.0,0.999,0.999
+18,Seasonal - ITN Only - High EIR - High dn0,+50%,24.06,0.4231,23.73,37.62,417577.0,626366.0,415045.0,640093.0,1.0061,0.9786
+18,Seasonal - ITN Only - High EIR - High dn0,-50%,24.06,0.4231,23.73,11.56,417577.0,208789.0,415045.0,208964.0,1.0061,0.9992
+18,Seasonal - ITN Only - High EIR - High dn0,baseline,24.06,0.4231,23.73,23.73,417577.0,417577.0,415045.0,415045.0,1.0061,1.0061
+23,Perennial - LSM Only - Low EIR,+50%,1.99,0.1245,1.99,3.45,53480.0,80220.0,53423.0,81482.0,1.0011,0.9845
+23,Perennial - LSM Only - Low EIR,-50%,1.99,0.1245,1.99,0.76,53480.0,26740.0,53423.0,28051.0,1.0011,0.9533
+23,Perennial - LSM Only - Low EIR,baseline,1.99,0.1245,1.99,1.99,53480.0,53480.0,53423.0,53423.0,1.0011,1.0011
+37,Perennial - IRS+LSM - High EIR,+50%,24.75,0.2256,24.97,38.64,281306.0,421959.0,277063.0,426411.0,1.0153,0.9896
+37,Perennial - IRS+LSM - High EIR,-50%,24.75,0.2256,24.97,13.81,281306.0,140653.0,277063.0,160483.0,1.0153,0.8764
+37,Perennial - IRS+LSM - High EIR,baseline,24.75,0.2256,24.97,24.97,281306.0,281306.0,277063.0,277063.0,1.0153,1.0153

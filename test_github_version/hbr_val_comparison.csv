@@ -1,0 +1,16 @@
+case_id,description,scenario,true_eir,prev_y9,malariasim_eir_y9,malariasim_hbr_y9,emulator_eir,emulator_hbr,hbr_ratio (emu/msim)
+37,Perennial - IRS+LSM - High EIR,-50%,24.75,0.2256,1399.59,277062.76,13.81,140653.15,
+37,Perennial - IRS+LSM - High EIR,baseline,24.75,0.2256,1399.59,277062.76,24.97,281306.3,1.0153
+37,Perennial - IRS+LSM - High EIR,+50%,24.75,0.2256,1399.59,277062.76,38.64,421959.45,
+18,Seasonal - ITN Only - High EIR - High dn0,-50%,24.06,0.4231,5862.31,415044.67,11.56,208788.68,
+18,Seasonal - ITN Only - High EIR - High dn0,baseline,24.06,0.4231,5862.31,415044.67,23.73,417577.36,1.0061
+18,Seasonal - ITN Only - High EIR - High dn0,+50%,24.06,0.4231,5862.31,415044.67,37.62,626366.03,
+8,Perennial - ITN Only - Mid EIR - Low dn0,-50%,12.06,0.3266,2853.64,243242.0,5.55,122088.87,
+8,Perennial - ITN Only - Mid EIR - Low dn0,baseline,12.06,0.3266,2853.64,243242.0,12.12,244177.74,1.0038
+8,Perennial - ITN Only - Mid EIR - Low dn0,+50%,12.06,0.3266,2853.64,243242.0,18.45,366266.61,
+23,Perennial - LSM Only - Low EIR,-50%,1.99,0.1245,549.59,53423.21,0.76,26739.88,
+23,Perennial - LSM Only - Low EIR,baseline,1.99,0.1245,549.59,53423.21,1.99,53479.76,1.0011
+23,Perennial - LSM Only - Low EIR,+50%,1.99,0.1245,549.59,53423.21,3.45,80219.64,
+13,Perennial - ITN Only - Low EIR - High dn0,-50%,2.23,0.1233,552.89,81165.0,0.81,40542.46,
+13,Perennial - ITN Only - Low EIR - High dn0,baseline,2.23,0.1233,552.89,81165.0,2.23,81084.91,0.999
+13,Perennial - ITN Only - Low EIR - High dn0,+50%,2.23,0.1233,552.89,81165.0,3.73,121627.37,

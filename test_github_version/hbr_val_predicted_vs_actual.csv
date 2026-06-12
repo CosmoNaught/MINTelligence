@@ -1,0 +1,16 @@
+case_id,description,scenario,true_eir,predicted_eir,predicted_hbr,actual_hbr
+8,Perennial - ITN Only - Mid EIR - Low dn0,baseline,12.06,12.12,244178,243242
+8,Perennial - ITN Only - Mid EIR - Low dn0,-50%,12.06,5.55,122089,123220
+8,Perennial - ITN Only - Mid EIR - Low dn0,+50%,12.06,18.45,366267,360158
+13,Perennial - ITN Only - Low EIR - High dn0,baseline,2.23,2.23,81085,81165
+13,Perennial - ITN Only - Low EIR - High dn0,-50%,2.23,0.81,40542,40720
+13,Perennial - ITN Only - Low EIR - High dn0,+50%,2.23,3.73,121627,121112
+18,Seasonal - ITN Only - High EIR - High dn0,baseline,24.06,23.73,417577,415045
+18,Seasonal - ITN Only - High EIR - High dn0,-50%,24.06,11.56,208789,208964
+18,Seasonal - ITN Only - High EIR - High dn0,+50%,24.06,37.62,626366,640093
+23,Perennial - LSM Only - Low EIR,baseline,1.99,1.99,53480,53423
+23,Perennial - LSM Only - Low EIR,-50%,1.99,0.76,26740,28051
+23,Perennial - LSM Only - Low EIR,+50%,1.99,3.45,80220,81482
+37,Perennial - IRS+LSM - High EIR,baseline,24.75,24.97,281306,277063
+37,Perennial - IRS+LSM - High EIR,-50%,24.75,13.81,140653,160483
+37,Perennial - IRS+LSM - High EIR,+50%,24.75,38.64,421959,426411

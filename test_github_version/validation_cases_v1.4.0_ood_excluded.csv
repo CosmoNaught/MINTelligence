@@ -1,0 +1,8 @@
+case_id,description,prev_y9,reason
+19,Perennial - IRS Only - Low EIR,8.500192422831417e-06,prev_y9 < 0.02
+21,Perennial - IRS Only - High EIR,0.008735268144465794,prev_y9 < 0.02
+22,Seasonal - IRS Only - Mid EIR,0.0011026363010032644,prev_y9 < 0.02
+28,Perennial - ITN+IRS - Mid EIR - Mid dn0,0.0,prev_y9 < 0.02
+38,Seasonal - IRS+LSM - Mid EIR,0.01604528119799888,prev_y9 < 0.02
+39,Perennial - All Three - Low EIR - Low dn0,0.0,prev_y9 < 0.02
+42,Seasonal - All Three - Mid EIR - Mid dn0,0.00020834784624354787,prev_y9 < 0.02
